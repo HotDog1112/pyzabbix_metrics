@@ -24,9 +24,10 @@ BB_TEMPLATES = ""
 
 def parse_and_create_template_groups(template_groups, zbxapi_5, zbxapi_7):
     """
-    template_groups: array, zabbix 5 template groups
-    zbxapi_5: object, ZabbixAPI 5.0 (old)
-    zbxapi_7: object, ZabbixAPI 7.0 (new)
+    Создание групп шаблонов в Zabbix 7, если они отсутствуют.
+    :param template_groups: array, zabbix 5 template groups
+    :param zbxapi_5: object, ZabbixAPI 5.0 (old)
+    :param zbxapi_7: object, ZabbixAPI 7.0 (new)
     """
     try:
         # если у шаблона более одной группы, и групп нет в Zabbix 7, создаем через templategroup.create
@@ -49,6 +50,7 @@ def parse_and_create_template_groups(template_groups, zbxapi_5, zbxapi_7):
 
 def parse_args():
     """
+    Парсер аргументов для авторизации в Zabbix
     :return: arguments : namespace
     """
     parser = argparse.ArgumentParser()
@@ -58,6 +60,12 @@ def parse_args():
 
 
 def find_parent(element, tree):
+    """
+    Поиск родительского элемента в дереве XML.
+    :param element: Элемент для которого ищется родитель.
+    :param tree: Дерево XML.
+    :return: Родительский элемент или None, если родитель не найден.
+    """
     for parent in tree.iter():
         if element in parent:
             return parent
@@ -79,18 +87,17 @@ def main():
     templates = []
     hostgroup_id = zbxapi_5.hostgroup.get()
     for group_id in hostgroup_id:
-        if re.search('^IS', group_id['name']):
-            if not re.search('ПРИМЕР_КОНТУРА_ИСКЛЮЧЕНИЯ', group_id['name']):
-                hosts = zbxapi_5.host.get(
-                    output='extend',
-                    groupids=group_id['groupid'],
-                    selectTemplates='1',
-                    selectParentTemplates='1',
-                )
-                for host in hosts:
-                    for template_host in host['parentTemplates']:
-                        if template_host['templateid'] not in templates:
-                            templates.append(template_host['templateid'])
+        if re.search('^IS', group_id['name']) and not re.search('ПРИМЕР_КОНТУРА_ИСКЛЮЧЕНИЯ', group_id['name']):
+            hosts = zbxapi_5.host.get(
+                output='extend',
+                groupids=group_id['groupid'],
+                selectTemplates='1',
+                selectParentTemplates='1',
+            )
+            for host in hosts:
+                for template_host in host['parentTemplates']:
+                    if template_host['templateid'] not in templates:
+                        templates.append(template_host['templateid'])
 
     # создаем сессию в BitBucket
     bb_session = requests.Session()
