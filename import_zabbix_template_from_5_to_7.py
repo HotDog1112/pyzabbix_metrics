@@ -63,10 +63,7 @@ def find_parent(element, tree):
             return parent
     return None
 
-
 def main():
-    template_id = 1 # id шаблона в Zabbix 5
-
     args = parse_args()
     username = args.user
     password = args.password
@@ -79,96 +76,145 @@ def main():
     zbxapi_7.session.verify = False
     zbxapi_7.login(username, password)
 
+    templates = []
+    hostgroup_id = zbxapi_5.hostgroup.get()
+    for group_id in hostgroup_id:
+        if re.search('^IS', group_id['name']):
+            if not re.search('ПРИМЕР_КОНТУРА_ИСКЛЮЧЕНИЯ', group_id['name']):
+                hosts = zbxapi_5.host.get(
+                    output='extend',
+                    groupids=group_id['groupid'],
+                    selectTemplates='1',
+                    selectParentTemplates='1',
+                )
+                for host in hosts:
+                    for template_host in host['parentTemplates']:
+                        if template_host['templateid'] not in templates:
+                            templates.append(template_host['templateid'])
+
     # создаем сессию в BitBucket
     bb_session = requests.Session()
     bb_session.auth = (BB_USER, BB_PASS)
 
-    template_info = zbxapi_5.template.get(
-        templateids=[template_id],
-        output='extend',
-        selectTemplates='1',
-        selectParentTemplates='1',
-        selectGroups='1'
-    )
+    all_templates_to_create = []
 
-    # парсим вывод
-    template_name = template_info[0]['name']
-    template_groups = [i['groupid'] for i in template_info[0]['groups']]
-
-    # создаем нужные группы для шаблона
-    get_create_t_groups = parse_and_create_template_groups(template_groups, zbxapi_5, zbxapi_7)
-
-
-    # если группы создались
-    if not get_create_t_groups:
-
-        # создаем лог шаблонов  и триггеров, у которых есть зависимости
-        logging.basicConfig(
-            level=logging.INFO,
-            filename="template_dependencies.log",
-            filemode="w",
-            format="%(asctime)s %(message)s \n"
+    for template_id in templates:
+        template_info = zbxapi_5.template.get(
+            templateids=[template_id],
+            output='extend',
+            selectTemplates='1',
+            selectParentTemplates='1',
+            selectGroups='1'
         )
 
-        response = bb_session.get(f'{BB_TEMPLATES}/browse/{template_name}.xml?limit=100000').json()
-        xml_content = ''.join(line['text'] for line in response['lines'])
+        # парсим вывод
+        template_name = template_info[0]['name']
+        template_groups = [i['groupid'] for i in template_info[0]['groups']]
 
-        # ищем зависимости триггеров, удаляем "инородные"
-        tree = ET.fromstring(xml_content)
+        # создаем нужные группы для шаблона
+        get_create_t_groups = parse_and_create_template_groups(template_groups, zbxapi_5, zbxapi_7)
 
-        all_trigger_dep = []
-        for elem in tree.findall('.//trigger'):
-            trigger_name = elem.find('name').text
-            dep = elem.find('dependencies')
-            if dep:
-                values = dep.findall('dependency')
-                for v in values:
-                    name = v.find('name').text if v.find('name') is not None else None
-                    expression = v.find('expression').text if v.find('expression') is not None else None
-                    if expression:
-                        dependent_template = expression.split(':')[0].replace('{', '')
-                    if not re.search(f'{template_name}:', expression):
-                        all_trigger_dep.append(f'\nШаблон: {template_name}\n'
-                                               f'Триггер:{trigger_name}\n'
-                                               f'Зависимость от: {dependent_template}, выражение триггерa: {expression}\n')
-                elem.remove(dep)
-        logging.info(''.join(all_trigger_dep))
+        parent_templates = template_info[0]['parentTemplates']
+        linked_to = template_info[0]['templates']
 
-        # если зависимости только внутри шаблона, можно импортировать
-        is_ready = 1
-        for depency in all_trigger_dep:
-            if not re.search(template_name, depency):
-                is_ready = 0
+        if parent_templates:
+            for t in parent_templates:
+                link_t_id = t['templateid']
+                template_info_linked = zbxapi_5.template.get(
+                    templateids=[link_t_id],
+                    output='extend',
+                    selectParentTemplates='1',
+                    selectGroups='1'
+                )
+                all_templates_to_create.append(template_info_linked[0]['name'])
 
-        if is_ready:
-            # заменяем request_type, fix error -- Invalid parameter "/1/request_method": value must be 0
-            for request_method in tree.findall('.//request_method'):
-                parent = find_parent(request_method, tree)
-                if parent is not None:
-                    parent.remove(request_method)
+        # текущий шаблон импортируем после импорта всех зависимостей, так называемый стек
+        all_templates_to_create.append(template_name)
 
-            template = ET.tostring(tree, encoding='unicode')
+        # если группы создались
+        if not get_create_t_groups:
 
-            zbxapi_7.confimport(
-                'xml',
-                template,
-                {
-                    "discoveryRules": {"createMissing": True, "updateExisting": True},
-                    "graphs": {"createMissing": True, "updateExisting": True},
-                    "template_groups": {"createMissing": True, "updateExisting": True},
-                    "hosts": {"createMissing": True, "updateExisting": True},
-                    "images": {"createMissing": True, "updateExisting": True},
-                    "items": {"createMissing": True, "updateExisting": True},
-                    "maps": {"createMissing": True, "updateExisting": True},
-                    # "screens": {"createMissing": True, "updateExisting": True},
-                    "templates": {"createMissing": True, "updateExisting": True},
-                    # "templateDashboards": {"createMissing": True, "updateExisting": True},
-                    "triggers": {"createMissing": True, "updateExisting": True, 'deleteMissing': True},
-                    "valueMaps": {"createMissing": True, "updateExisting": True},
-                }
+            # создаем лог шаблонов  и триггеров, у которых есть зависимости
+            logging.basicConfig(
+                level=logging.INFO,
+                filename="template_dependencies.log",
+                filemode="a",
+                format="%(asctime)s %(message)s \n"
             )
+            for template_name in all_templates_to_create:
+                if zbxapi_7.template.get(search={'name': template_name}):
+                    continue
+
+                try:
+                    response = bb_session.get(f'{BB_TEMPLATES}/browse/{template_name}.xml?limit=100000').json()
+                    xml_content = (''.join(line['text'] for line in response['lines']))
+                    res = str.encode(xml_content, encoding='utf-8').replace(b'\r\n', b'\n').decode('utf-8')
+                except:
+                    pass
+
+                # ищем зависимости триггеров, удаляем "инородные"
+                tree = ET.fromstring(res)
+
+                all_trigger_dep = []
+                for elem in tree.findall('.//trigger'):
+                    trigger_name = elem.find('name').text
+                    dep = elem.find('dependencies')
+                    if dep:
+                        values = dep.findall('dependency')
+                        for v in values:
+                            name = v.find('name').text if v.find('name') is not None else None
+                            expression = v.find('expression').text if v.find('expression') is not None else None
+                            if expression:
+                                dependent_template = expression.split(':')[0].replace('{', '')
+                            if not re.search(f'{template_name}:', expression):
+                                all_trigger_dep.append(f'\nШаблон: {template_name}\n'
+                                                       f'Триггер:{trigger_name}\n'
+                                                       f'Зависимость от: {dependent_template}, выражение триггерa: {expression}\n')
+                        elem.remove(dep)
+                if all_trigger_dep:
+                    logging.info(''.join(all_trigger_dep))
+
+                # если зависимости только внутри шаблона, можно импортировать
+                is_ready = 1
+                for depency in all_trigger_dep:
+                    if not re.search(template_name, depency):
+                        is_ready = 0
+
+                if is_ready:
+                    # заменяем request_type, fix error -- Invalid parameter "/1/request_method": value must be 0
+                    for request_method in tree.findall('.//request_method'):
+                        parent = find_parent(request_method, tree)
+                        if parent is not None:
+                            parent.remove(request_method)
+
+                    template = ET.tostring(tree, encoding='unicode')
+
+                    try:
+                        zbxapi_7.confimport(
+                            'xml',
+                            template,
+                            {
+                                "discoveryRules": {"createMissing": True, "updateExisting": True},
+                                "graphs": {"createMissing": True, "updateExisting": True},
+                                "template_groups": {"createMissing": True, "updateExisting": True},
+                                "hosts": {"createMissing": True, "updateExisting": True},
+                                "images": {"createMissing": True, "updateExisting": True},
+                                "items": {"createMissing": True, "updateExisting": True},
+                                "maps": {"createMissing": True, "updateExisting": True},
+                                "templates": {"createMissing": True, "updateExisting": True},
+                                "templateLinkage": {"createMissing": True},
+                                "triggers": {"createMissing": True, "updateExisting": True, 'deleteMissing': True},
+                                "valueMaps": {"createMissing": True, "updateExisting": True},
+                                "httptests": {"createMissing": True, "updateExisting": True},
+                            }
+                        )
+
+                    except Exception as e:
+                        print(e)
+                        pass
+    zbxapi_5.logout()
+    zbxapi_7.logout()
 
 
 if __name__ == "__main__":
     main()
-
